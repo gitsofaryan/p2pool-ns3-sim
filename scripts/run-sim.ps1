@@ -38,17 +38,23 @@ function Download-NS3 {
 if (-not (Test-Path $ns3Dir)) {
     Download-NS3
     Write-Host "Extracting NS3..."
-    try {
-        # Requires 7-Zip for tar.bz2 extraction
-        & "C:\Program Files\7-Zip\7z.exe" x $ns3Archive -o"$PSScriptRoot/.." -y
-        & "C:\Program Files\7-Zip\7z.exe" x "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -o"$PSScriptRoot/.." -y
-        Remove-Item $ns3Archive -ErrorAction SilentlyContinue
-        Remove-Item "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -ErrorAction SilentlyContinue
-    }
-    catch {
-        Write-Error "Failed to extract NS3: $_"
-        exit 1
-    }
+try {
+    & "C:\Program Files\7-Zip\7z.exe" x $ns3Archive -o"$PSScriptRoot/.." -y
+    & "C:\Program Files\7-Zip\7z.exe" x "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -o"$PSScriptRoot/.." -y
+    Remove-Item $ns3Archive -ErrorAction SilentlyContinue
+    Remove-Item "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Error "Failed to extract NS3: $_"
+    exit 1
+}
+
+Write-Host "Listing extracted directories:"
+Get-ChildItem "$PSScriptRoot/.."
+
+if (-not (Test-Path "$ns3Dir/scratch")) {
+    Write-Error "NS-3 scratch directory not found: $ns3Dir/scratch"
+    exit 1
 }
 
 # Copy simulation script to NS3 scratch directory
@@ -59,7 +65,6 @@ catch {
     Write-Error "Failed to copy simulation script: $_"
     exit 1
 }
-
 # Build NS3 with CMake
 cd "$ns3Dir"
 if (-not (Test-Path "build")) {
