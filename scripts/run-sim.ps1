@@ -40,7 +40,7 @@ if (-not (Test-Path $ns3Dir)) {
     Download-NS3
     Write-Host "Extracting NS-3..."
     try {
-        # Use 7z from PATH (installed via Chocolatey in GitHub Actions)
+        # Use 7z from PATH (installed via Chocolatey)
         7z x $ns3Archive -o"$PSScriptRoot/.." -y
         7z x "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -o"$PSScriptRoot/.." -y
         Remove-Item $ns3Archive -ErrorAction SilentlyContinue
@@ -79,20 +79,28 @@ if (-not (Test-Path "build")) {
 }
 Set-Location "build"
 try {
-    Write-Host "Running CMake..."
-    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_WITH_BOOST=OFF
+    Write-Host "Running CMake with verbose output..."
+    # Limit to required modules and disable optional features
+    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_BOOST=OFF -DNS3_PYTHON=OFF -DNS3_GTK3=OFF -DNS3_MPI=OFF -DNS3_ENABLED_MODULES=core;network;internet;point-to-point;applications -DCMAKE_VERBOSE_MAKEFILE=ON
     Write-Host "Building NS-3..."
-    cmake --build . --config Release
+    # Use parallel build with max processors
+    cmake --build . --config Release -- -maxcpucount
 }
 catch {
     Write-Error "Failed to build NS-3: $_"
     exit 1
 }
+finally {
+    # Check if build directory contains expected output
+    if (-not (Test-Path ".\scratch\p2pool-sim\p2pool-sim.exe")) {
+        Write-Error "Build did not produce expected executable: .\scratch\p2pool-sim\p2pool-sim.exe"
+        exit 1
+    }
+}
 
 # Run the simulation
 Write-Host "Running simulation with args: $args"
 try {
-    # NS-3 places scratch executables in build/scratch/<script-name>
     $exePath = ".\scratch\p2pool-sim\p2pool-sim.exe"
     if (-not (Test-Path $exePath)) {
         Write-Error "Simulation executable not found: $exePath"
