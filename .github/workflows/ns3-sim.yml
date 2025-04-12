@@ -11,29 +11,64 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+    
     - name: Install Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.9'
+    
     - name: Install CMake
       uses: lukka/get-cmake@latest
+    
     - name: Install 7-Zip
       run: choco install 7zip -y
       shell: powershell
+    
+    - name: Install Boost
+      run: |
+        choco install boost-msvc-14.2 -y
+        # Add Boost to the path environment variable
+        echo "BOOST_ROOT=C:\local\boost_1_73_0" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "BOOST_INCLUDEDIR=C:\local\boost_1_73_0" | Out-File -FilePath $env:GITHUB_ENV -Append
+        echo "BOOST_LIBRARYDIR=C:\local\boost_1_73_0\lib64-msvc-14.2" | Out-File -FilePath $env:GITHUB_ENV -Append
+      shell: powershell
+    
     - name: Setup Visual Studio Environment
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
+    
     - name: Verify Visual Studio Environment
       run: |
         cl
         Write-Host "Visual Studio compiler found"
       shell: powershell
+    
+    - name: Fix run-sim script
+      run: |
+        $scriptContent = Get-Content -Path "scripts/run-sim.ps1" -Raw
+        # Add more detailed error handling
+        $scriptContent = $scriptContent -replace "cmake --build . --config Release --target p2pool-sim -- -maxcpucount > build.log 2>&1", "cmake --build . --config Release --target scratch/p2pool-sim -- -maxcpucount:4 -verbosity:normal | Tee-Object -FilePath build.log"
+        $scriptContent = $scriptContent -replace '\$exePath = "\.\\scratch\\p2pool-sim\\p2pool-sim\.exe"', '$exePath = ".\ns3.44-p2pool-sim-release.exe"'
+        $scriptContent | Set-Content -Path "scripts/run-sim.ps1"
+      shell: powershell
+    
     - name: Run NS-3 Simulation
       run: |
         cd scripts
-        .\run-sim.ps1 --nNodes=200 --simDuration=1800 > ..\simulation-results.txt
+        .\run-sim.ps1 --nNodes=100 --simDuration=600 > ..\simulation-results.txt
       shell: powershell
+    
+    - name: Upload Build Log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          scripts/../ns-allinone-3.44/ns-3.44/build/build.log
+          scripts/../ns-allinone-3.44/ns-3.44/build/CMakeFiles/CMakeOutput.log
+          scripts/../ns-allinone-3.44/ns-3.44/build/CMakeFiles/CMakeError.log
+    
     - name: Upload Results
       if: always()
       uses: actions/upload-artifact@v4
