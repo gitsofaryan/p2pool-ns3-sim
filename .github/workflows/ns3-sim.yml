@@ -1,1 +1,38 @@
+name: NS3 Simulation
 
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  simulate:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Install 7-Zip
+      run: choco install 7zip -y
+      shell: powershell
+
+    - name: Run NS3 Simulation
+      run: |
+        cd scripts
+        .\run-sim.ps1 --nNodes=200 --simDuration=1800 > ../simulation-results.txt
+      shell: powershell
+
+    - name: Upload Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: simulation-results
+        path: simulation-results.txt
