@@ -40,7 +40,7 @@ if (-not (Test-Path $ns3Dir)) {
     Download-NS3
     Write-Host "Extracting NS-3..."
     try {
-        # Assuming 7-Zip is available in PATH (e.g., installed via Chocolatey in CI)
+        # Use 7z from PATH (installed via Chocolatey in GitHub Actions)
         7z x $ns3Archive -o"$PSScriptRoot/.." -y
         7z x "$PSScriptRoot/../ns-allinone-$ns3Version.tar" -o"$PSScriptRoot/.." -y
         Remove-Item $ns3Archive -ErrorAction SilentlyContinue
@@ -52,9 +52,9 @@ if (-not (Test-Path $ns3Dir)) {
     }
 }
 
-# List extracted directories for verification
+# List extracted directories for debugging
 Write-Host "Listing extracted directories:"
-Get-ChildItem "$PSScriptRoot/.."
+Get-ChildItem "$PSScriptRoot/.." | Format-Table -AutoSize
 
 # Verify the scratch directory exists
 if (-not (Test-Path "$ns3Dir/scratch")) {
@@ -64,6 +64,7 @@ if (-not (Test-Path "$ns3Dir/scratch")) {
 
 # Copy the simulation script to the NS-3 scratch directory
 try {
+    Write-Host "Copying p2pool-sim.cc to $ns3Dir/scratch/"
     Copy-Item "$PSScriptRoot/../src/p2pool-sim.cc" "$ns3Dir/scratch/" -Force -ErrorAction Stop
 }
 catch {
@@ -78,7 +79,9 @@ if (-not (Test-Path "build")) {
 }
 Set-Location "build"
 try {
-    cmake .. -G "Visual Studio 17 2022" -A x64
+    Write-Host "Running CMake..."
+    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_WITH_BOOST=OFF
+    Write-Host "Building NS-3..."
     cmake --build . --config Release
 }
 catch {
@@ -87,10 +90,21 @@ catch {
 }
 
 # Run the simulation
-Set-Location "$ns3Dir/build"
 Write-Host "Running simulation with args: $args"
-& ".\bin\scratch_p2pool-sim.exe" $args
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Simulation failed with exit code $LASTEXITCODE"
+try {
+    # NS-3 places scratch executables in build/scratch/<script-name>
+    $exePath = ".\scratch\p2pool-sim\p2pool-sim.exe"
+    if (-not (Test-Path $exePath)) {
+        Write-Error "Simulation executable not found: $exePath"
+        exit 1
+    }
+    & $exePath $args
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Simulation failed with exit code $LASTEXITCODE"
+        exit 1
+    }
+}
+catch {
+    Write-Error "Failed to run simulation: $_"
     exit 1
 }
