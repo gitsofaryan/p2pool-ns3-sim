@@ -80,20 +80,29 @@ if (-not (Test-Path "build")) {
 Set-Location "build"
 try {
     Write-Host "Running CMake with verbose output..."
-    # Limit to required modules and disable optional features
-    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_BOOST=OFF -DNS3_PYTHON=OFF -DNS3_GTK3=OFF -DNS3_MPI=OFF -DNS3_ENABLED_MODULES=core;network;internet;point-to-point;applications -DCMAKE_VERBOSE_MAKEFILE=ON
-    Write-Host "Building NS-3..."
-    # Use parallel build with max processors
-    cmake --build . --config Release -- -maxcpucount
+    # Use correct flags for NS-3 3.44, disable optional features
+    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_LOG=ON -DNS3_ASSERT=ON -DNS3_EXAMPLES=OFF -DNS3_TESTS=OFF -DNS3_PYTHON_BINDINGS=OFF -DNS3_GTK3=OFF -DNS3_MPI=OFF -DCMAKE_VERBOSE_MAKEFILE=ON
+    Write-Host "Building NS-3 (p2pool-sim only)..."
+    # Build only the scratch program to isolate issues
+    cmake --build . --config Release --target p2pool-sim -- -maxcpucount > build.log 2>&1
 }
 catch {
     Write-Error "Failed to build NS-3: $_"
+    if (Test-Path "build.log") {
+        Write-Host "Build log contents:"
+        Get-Content "build.log"
+    }
     exit 1
 }
 finally {
     # Check if build directory contains expected output
-    if (-not (Test-Path ".\scratch\p2pool-sim\p2pool-sim.exe")) {
-        Write-Error "Build did not produce expected executable: .\scratch\p2pool-sim\p2pool-sim.exe"
+    $exePath = ".\scratch\p2pool-sim\p2pool-sim.exe"
+    if (-not (Test-Path $exePath)) {
+        Write-Error "Build did not produce expected executable: $exePath"
+        if (Test-Path "build.log") {
+            Write-Host "Build log contents:"
+            Get-Content "build.log"
+        }
         exit 1
     }
 }
@@ -101,11 +110,6 @@ finally {
 # Run the simulation
 Write-Host "Running simulation with args: $args"
 try {
-    $exePath = ".\scratch\p2pool-sim\p2pool-sim.exe"
-    if (-not (Test-Path $exePath)) {
-        Write-Error "Simulation executable not found: $exePath"
-        exit 1
-    }
     & $exePath $args
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Simulation failed with exit code $LASTEXITCODE"
