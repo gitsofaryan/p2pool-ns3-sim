@@ -5,37 +5,47 @@
 #include <ns3/applications-module.h>
 #include <ns3/log.h>
 #include <ns3/random-variable-stream.h>
-#include <random>
 #include <map>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <iomanip>
-#include <chrono>
 
 using namespace ns3;
 
-NS_LOG_COMPONENT_DEFINE("P2PoolSim");
+NS_LOG_COMPONENT_DEFINE("P2PoolSimplified");
 
 // Share structure to represent a share in the sharechain
-struct Share {
+class Share {
+public:
     std::string hash;              // Unique identifier for the share
     uint32_t height;               // Height in the sharechain
     double timestamp;              // Creation time
     std::string parentHash;        // Hash of the parent share
     std::vector<std::string> uncles; // List of uncle share hashes
-    Share(std::string h, uint32_t ht, double ts, std::string ph, std::vector<std::string> u)
+    
+    Share() : height(0), timestamp(0.0) {}
+    
+    Share(const std::string& h, uint32_t ht, double ts, const std::string& ph, 
+          const std::vector<std::string>& u)
         : hash(h), height(ht), timestamp(ts), parentHash(ph), uncles(u) {}
 };
 
 // Sharechain class to manage shares and track metrics
 class Sharechain {
 public:
+    std::map<std::string, Share> shares_; // Hash -> Share mapping
+    uint32_t uncleCount_;             // Total uncles included
+    uint32_t orphanCount_;            // Total orphans rejected
+    
+    Sharechain() : uncleCount_(0), orphanCount_(0) {}
+    
     void AddShare(const Share& share, double currentTime) {
         // Check for duplicate shares
         if (shares_.find(share.hash) != shares_.end()) {
             return;
         }
+        
         // Validate share: ensure parent exists and height is correct
         if (share.parentHash.empty() || shares_.find(share.parentHash) != shares_.end()) {
             uint32_t expectedHeight = share.parentHash.empty() ? 0 : shares_[share.parentHash].height + 1;
@@ -69,108 +79,145 @@ private:
         }
         return false;
     }
-
-    std::map<std::string, Share> shares_; // Hash -> Share mapping
-    uint32_t uncleCount_ = 0;             // Total uncles included
-    uint32_t orphanCount_ = 0;            // Total orphans rejected
 };
 
-// P2PoolApp: Custom application for each node
 class P2PoolApp : public Application {
 public:
-    P2PoolApp() : shareCount_(0), socket_(nullptr), peers_(), sharechain_() {
-        shareDist_ = CreateObject<NormalRandomVariable>();
+    P2PoolApp() : nodeId_(0), shareCount_(0) {
+        shareDist_ = CreateObject<ExponentialRandomVariable>();
         latencyDist_ = CreateObject<NormalRandomVariable>();
     }
 
-    void Setup(uint32_t nodeId, Ptr<Socket> socket, std::vector<Ipv4Address> peers,
-               double shareMean, double shareStd, double latencyMean, double latencyStd) {
+    void Setup(uint32_t nodeId, std::vector<Ptr<Socket>> sockets, 
+               std::vector<Ipv4Address> peers, double shareMean, double latencyMean, double latencyStd) {
         nodeId_ = nodeId;
-        socket_ = socket;
+        sockets_ = sockets;
         peers_ = peers;
+        
         shareDist_->SetAttribute("Mean", DoubleValue(shareMean));
-        shareDist_->SetAttribute("Variance", DoubleValue(shareStd * shareStd));
+        
         latencyDist_->SetAttribute("Mean", DoubleValue(latencyMean));
         latencyDist_->SetAttribute("Variance", DoubleValue(latencyStd * latencyStd));
-        socket_->SetRecvCallback(MakeCallback(&P2PoolApp::HandleReceive, this));
+        
+        for (auto socket : sockets_) {
+            socket->SetRecvCallback(MakeCallback(&P2PoolApp::HandleReceive, this));
+        }
     }
+    
+    Sharechain sharechain_;
 
 private:
-    void StartApplication() override {
+    virtual void StartApplication() {
+        NS_LOG_INFO("Node " << nodeId_ << " started at " << Simulator::Now().GetSeconds());
         ScheduleShare();
     }
-
-    void ScheduleShare() {
-        double delay = shareDist_->GetValue();
-        Simulator::Schedule(Seconds(std::max(0.1, delay)), &P2PoolApp::GenerateShare, this);
+    
+    virtual void StopApplication() {
+        NS_LOG_INFO("Node " << nodeId_ << " stopped at " << Simulator::Now().GetSeconds());
     }
-
+    
+    void ScheduleShare() {
+        double delay = std::max(0.1, shareDist_->GetValue());
+        Simulator::Schedule(Seconds(delay), &P2PoolApp::GenerateShare, this);
+    }
+    
     void GenerateShare() {
         shareCount_++;
-        std::string parentHash = GetLatestShareHash();
-        uint32_t height = parentHash.empty() ? 0 : sharechain_.shares_[parentHash].height + 1;
-        std::string hash = GenerateHash();
-        double timestamp = Simulator::Now().GetSeconds();
-        std::vector<std::string> uncles = GetUncles(height);
-        Share newShare(hash, height, timestamp, parentHash, uncles);
-        sharechain_.AddShare(newShare, timestamp);
-        NS_LOG_INFO("Node " << nodeId_ << " generated share: " << hash << " at height " << height);
-        BroadcastShare(newShare);
-        ScheduleShare();
-    }
-
-    std::string GetLatestShareHash() {
-        if (sharechain_.shares_.empty()) {
-            return "";
+        
+        // Get latest share hash
+        std::string parentHash;
+        uint32_t height = 0;
+        
+        if (!sharechain_.shares_.empty()) {
+            // Find the highest height share
+            uint32_t maxHeight = 0;
+            for (const auto& pair : sharechain_.shares_) {
+                if (pair.second.height > maxHeight) {
+                    maxHeight = pair.second.height;
+                    parentHash = pair.first;
+                }
+            }
+            height = maxHeight + 1;
         }
-        auto it = std::max_element(sharechain_.shares_.begin(), sharechain_.shares_.end(),
-            [](const auto& a, const auto& b) { return a.second.height < b.second.height; });
-        return it->first;
-    }
-
-    std::vector<std::string> GetUncles(uint32_t currentHeight) {
+        
+        // Generate a unique hash
+        std::stringstream ss;
+        ss << "share-" << nodeId_ << "-" << shareCount_ << "-" 
+           << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds();
+        std::string hash = ss.str();
+        
+        // Get uncles (up to 2)
         std::vector<std::string> uncles;
         for (const auto& pair : sharechain_.shares_) {
-            if (pair.second.height < currentHeight && currentHeight - pair.second.height <= 7) {
-                uncles.push_back(pair.first);
-                if (uncles.size() >= 2) break; // Limit to 2 uncles per share
+            if (pair.second.height < height && height - pair.second.height <= 7) {
+                // Check if this is not already included as an uncle in the chain
+                bool alreadyIncluded = false;
+                for (const auto& sharePair : sharechain_.shares_) {
+                    for (const auto& uncleHash : sharePair.second.uncles) {
+                        if (uncleHash == pair.first) {
+                            alreadyIncluded = true;
+                            break;
+                        }
+                    }
+                    if (alreadyIncluded) break;
+                }
+                
+                if (!alreadyIncluded) {
+                    uncles.push_back(pair.first);
+                    if (uncles.size() >= 2) break; // Max 2 uncles
+                }
             }
         }
-        return uncles;
+        
+        // Create new share
+        double timestamp = Simulator::Now().GetSeconds();
+        Share newShare(hash, height, timestamp, parentHash, uncles);
+        
+        // Add to local sharechain
+        sharechain_.AddShare(newShare, timestamp);
+        
+        NS_LOG_INFO("Node " << nodeId_ << " generated share: " << hash << " at height " << height);
+        
+        // Broadcast to peers
+        std::string serializedShare = SerializeShare(newShare);
+        BroadcastShare(serializedShare);
+        
+        // Schedule next share
+        ScheduleShare();
     }
-
-    std::string GenerateHash() {
-        std::stringstream ss;
-        ss << "share-" << nodeId_ << "-" << shareCount_ << "-" << std::fixed << std::setprecision(6) << Simulator::Now().GetSeconds();
-        return ss.str();
-    }
-
-    void BroadcastShare(const Share& share) {
-        std::string shareData = SerializeShare(share);
-        for (const auto& peer : peers_) {
-            Ptr<Packet> packet = Create<Packet>((uint8_t*)shareData.c_str(), shareData.size());
-            double latency = latencyDist_->GetValue();
-            Simulator::Schedule(Seconds(std::max(0.01, latency)), &P2PoolApp::SendPacket, this, packet, peer);
+    
+    void BroadcastShare(const std::string& shareData) {
+        for (size_t i = 0; i < peers_.size(); i++) {
+            if (i < sockets_.size()) {
+                Ptr<Packet> packet = Create<Packet>((uint8_t*)shareData.c_str(), shareData.size());
+                double latency = std::max(0.01, latencyDist_->GetValue());
+                Simulator::Schedule(Seconds(latency), &P2PoolApp::SendPacket, this, 
+                                    packet, peers_[i], sockets_[i]);
+            }
         }
     }
-
-    void SendPacket(Ptr<Packet> packet, Ipv4Address peer) {
-        socket_->SendTo(packet, 0, InetSocketAddress(peer, 9000));
+    
+    void SendPacket(Ptr<Packet> packet, Ipv4Address peer, Ptr<Socket> socket) {
+        socket->SendTo(packet, 0, InetSocketAddress(peer, 9000));
     }
-
+    
     void HandleReceive(Ptr<Socket> socket) {
         Ptr<Packet> packet;
-        while ((packet = socket->Recv())) {
+        Address from;
+        while ((packet = socket->RecvFrom(from))) {
             uint8_t buffer[1024];
-            packet->CopyData(buffer, packet->GetSize());
-            std::string shareData(buffer, buffer + packet->GetSize());
+            uint32_t size = std::min(1024u, packet->GetSize());
+            packet->CopyData(buffer, size);
+            std::string shareData(reinterpret_cast<char*>(buffer), size);
+            
             Share receivedShare = DeserializeShare(shareData);
             double currentTime = Simulator::Now().GetSeconds();
+            
             sharechain_.AddShare(receivedShare, currentTime);
             NS_LOG_INFO("Node " << nodeId_ << " received share: " << receivedShare.hash);
         }
     }
-
+    
     std::string SerializeShare(const Share& share) {
         std::stringstream ss;
         ss << share.hash << "|" << share.height << "|" << share.timestamp << "|" << share.parentHash;
@@ -179,134 +226,149 @@ private:
         }
         return ss.str();
     }
-
+    
     Share DeserializeShare(const std::string& data) {
         std::stringstream ss(data);
         std::string hash, parentHash, token;
         uint32_t height;
         double timestamp;
         std::vector<std::string> uncles;
+        
         std::getline(ss, hash, '|');
         std::getline(ss, token, '|');
         height = std::stoi(token);
         std::getline(ss, token, '|');
         timestamp = std::stod(token);
         std::getline(ss, parentHash, '|');
+        
         while (std::getline(ss, token, '|')) {
             uncles.push_back(token);
         }
+        
         return Share(hash, height, timestamp, parentHash, uncles);
     }
-
-    uint32_t nodeId_;                    // Unique node identifier
-    uint32_t shareCount_;                // Counter for shares generated by this node
-    Ptr<Socket> socket_;                 // UDP socket for communication
-    std::vector<Ipv4Address> peers_;     // List of peer IP addresses
-    Ptr<NormalRandomVariable> shareDist_; // Distribution for share intervals
-    Ptr<NormalRandomVariable> latencyDist_; // Distribution for latency
-    Sharechain sharechain_;              // Local sharechain instance
+    
+    uint32_t nodeId_;
+    uint32_t shareCount_;
+    std::vector<Ptr<Socket>> sockets_;
+    std::vector<Ipv4Address> peers_;
+    Ptr<ExponentialRandomVariable> shareDist_;
+    Ptr<NormalRandomVariable> latencyDist_;
 };
 
-// Main simulation function
 int main(int argc, char* argv[]) {
-    uint32_t nNodes = 100;        // Default number of nodes
-    double latencyMean = 0.1;     // Mean latency in seconds
-    double latencyStd = 0.02;     // Std dev of latency
-    double shareMean = 10.0;      // Mean share production interval in seconds
-    double shareStd = 2.0;        // Std dev of share production
-    double simDuration = 3600.0;  // Simulation duration in seconds
-
-    // Parse command-line arguments
+    // Default parameters
+    uint32_t nNodes = 50;           // Number of nodes
+    double latencyMean = 0.1;       // Mean latency in seconds
+    double latencyStd = 0.02;       // Latency standard deviation
+    double shareMean = 10.0;        // Mean time between shares
+    double simDuration = 1800.0;    // Simulation time in seconds
+    
+    // Parse command line arguments
     CommandLine cmd;
     cmd.AddValue("nNodes", "Number of nodes", nNodes);
     cmd.AddValue("latencyMean", "Mean latency in seconds", latencyMean);
     cmd.AddValue("latencyStd", "Standard deviation of latency", latencyStd);
     cmd.AddValue("shareMean", "Mean share production interval", shareMean);
-    cmd.AddValue("shareStd", "Standard deviation of share production", shareStd);
     cmd.AddValue("simDuration", "Simulation duration in seconds", simDuration);
     cmd.Parse(argc, argv);
-
-    LogComponentEnable("P2PoolSim", LOG_LEVEL_INFO);
-
+    
+    // Configure logging
+    LogComponentEnable("P2PoolSimplified", LOG_LEVEL_INFO);
+    
     // Create nodes
     NodeContainer nodes;
     nodes.Create(nNodes);
-
-    // Set up point-to-point links
-    PointToPointHelper p2p;
-    p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
-    p2p.SetChannelAttribute("Delay", StringValue("0ms")); // Latency handled in app
-
+    
     // Install internet stack
-    InternetStackHelper stack;
-    stack.Install(nodes);
-
+    InternetStackHelper internet;
+    internet.Install(nodes);
+    
+    // Create point-to-point links
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("1Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+    
     // Assign IP addresses
     Ipv4AddressHelper address;
     address.SetBase("10.1.0.0", "255.255.0.0");
-
-    std::vector<NetDeviceContainer> devices;
-    std::vector<Ipv4InterfaceContainer> interfaces;
-    std::vector<std::vector<Ipv4Address>> peers(nNodes);
-
-    // Create a random mesh: each node connects to 4 peers
-    std::mt19937 rng(std::chrono::system_clock::now().time_since_epoch().count());
-    for (uint32_t i = 0; i < nNodes; ++i) {
-        std::vector<uint32_t> peerIds;
-        while (peerIds.size() < 4 && peerIds.size() < nNodes - 1) {
-            uint32_t peer = rng() % nNodes;
-            if (peer != i && std::find(peerIds.begin(), peerIds.end(), peer) == peerIds.end()) {
-                peerIds.push_back(peer);
-            }
-        }
-        for (uint32_t peer : peerIds) {
-            NodeContainer pair(nodes.Get(i), nodes.Get(peer));
-            NetDeviceContainer dev = p2p.Install(pair);
-            devices.push_back(dev);
-            Ipv4InterfaceContainer iface = address.Assign(dev);
-            interfaces.push_back(iface);
-            peers[i].push_back(iface.GetAddress(1));
-            peers[peer].push_back(iface.GetAddress(0));
+    
+    // Create a simple mesh network: each node connects to 4 peers (or less for small networks)
+    std::vector<std::vector<Ipv4Address>> peerAddresses(nNodes);
+    std::vector<std::vector<Ptr<Socket>>> nodeSockets(nNodes);
+    
+    uint32_t peersPerNode = std::min(4u, nNodes - 1);
+    for (uint32_t i = 0; i < nNodes; i++) {
+        for (uint32_t j = 1; j <= peersPerNode; j++) {
+            uint32_t peerIndex = (i + j) % nNodes;
+            
+            // Create the P2P network devices and channel
+            NetDeviceContainer devices = p2p.Install(nodes.Get(i), nodes.Get(peerIndex));
+            
+            // Assign IP addresses to the devices
+            Ipv4InterfaceContainer interfaces = address.Assign(devices);
+            
+            // Store peer addresses
+            peerAddresses[i].push_back(interfaces.GetAddress(1));
+            peerAddresses[peerIndex].push_back(interfaces.GetAddress(0));
+            
+            // Create sockets for communication
+            Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(i), UdpSocketFactory::GetTypeId());
+            socket->Bind(InetSocketAddress(interfaces.GetAddress(0), 9000));
+            nodeSockets[i].push_back(socket);
+            
+            Ptr<Socket> peerSocket = Socket::CreateSocket(nodes.Get(peerIndex), UdpSocketFactory::GetTypeId());
+            peerSocket->Bind(InetSocketAddress(interfaces.GetAddress(1), 9000));
+            nodeSockets[peerIndex].push_back(peerSocket);
+            
+            // Move to the next subnet
             address.NewNetwork();
         }
     }
-
-    // Install applications
-    ApplicationContainer apps;
-    for (uint32_t i = 0; i < nNodes; ++i) {
-        Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(i), TypeId::LookupByName("ns3::UdpSocketFactory"));
-        socket->Bind(InetSocketAddress(Ipv4Address::GetAny(), 9000));
+    
+    // Create and install applications
+    std::vector<Ptr<P2PoolApp>> apps;
+    for (uint32_t i = 0; i < nNodes; i++) {
         Ptr<P2PoolApp> app = CreateObject<P2PoolApp>();
-        app->Setup(i, socket, peers[i], shareMean, shareStd, latencyMean, latencyStd);
+        app->Setup(i, nodeSockets[i], peerAddresses[i], shareMean, latencyMean, latencyStd);
         nodes.Get(i)->AddApplication(app);
-        apps.Add(app);
+        app->SetStartTime(Seconds(0.0));
+        app->SetStopTime(Seconds(simDuration));
+        apps.push_back(app);
     }
-
-    // Start and stop simulation
-    apps.Start(Seconds(0.0));
-    apps.Stop(Seconds(simDuration));
-
+    
+    // Run simulation
+    NS_LOG_INFO("Running simulation for " << simDuration << " seconds");
+    Simulator::Stop(Seconds(simDuration));
     Simulator::Run();
-
+    
     // Collect and report metrics
     uint32_t totalShares = 0;
     uint32_t totalUncles = 0;
     uint32_t totalOrphans = 0;
-    for (uint32_t i = 0; i < nNodes; ++i) {
-        Ptr<P2PoolApp> app = DynamicCast<P2PoolApp>(apps.Get(i));
-        totalShares += app->sharechain_.GetTotalShares();
-        totalUncles += app->sharechain_.GetUncleCount();
-        totalOrphans += app->sharechain_.GetOrphanCount();
+    
+    for (uint32_t i = 0; i < nNodes; i++) {
+        totalShares += apps[i]->sharechain_.GetTotalShares();
+        totalUncles += apps[i]->sharechain_.GetUncleCount();
+        totalOrphans += apps[i]->sharechain_.GetOrphanCount();
     }
-
-    double unclePercentage = (totalShares > 0) ? (static_cast<double>(totalUncles) / totalShares) * 100.0 : 0.0;
-    double orphanPercentage = (totalShares > 0) ? (static_cast<double>(totalOrphans) / totalShares) * 100.0 : 0.0;
-
-    std::cout << "Simulation Results:" << std::endl;
-    std::cout << "Total Shares: " << totalShares << std::endl;
-    std::cout << "Total Uncles: " << totalUncles << " (" << unclePercentage << "%)" << std::endl;
-    std::cout << "Total Orphans: " << totalOrphans << " (" << orphanPercentage << "%)" << std::endl;
-
+    
+    // Calculate percentages
+    double unclePercentage = totalShares > 0 ? (static_cast<double>(totalUncles) / totalShares) * 100.0 : 0.0;
+    double orphanPercentage = totalShares > 0 ? (static_cast<double>(totalOrphans) / totalShares) * 100.0 : 0.0;
+    
+    // Print results
+    std::cout << "\n===== P2Pool Simulation Results =====" << std::endl;
+    std::cout << "Configuration:" << std::endl;
+    std::cout << "  - Nodes: " << nNodes << std::endl;
+    std::cout << "  - Mean latency: " << latencyMean << " seconds" << std::endl;
+    std::cout << "  - Mean share interval: " << shareMean << " seconds" << std::endl;
+    std::cout << "  - Simulation duration: " << simDuration << " seconds" << std::endl;
+    std::cout << "\nResults:" << std::endl;
+    std::cout << "  - Total shares: " << totalShares << std::endl;
+    std::cout << "  - Uncle blocks: " << totalUncles << " (" << std::fixed << std::setprecision(2) << unclePercentage << "%)" << std::endl;
+    std::cout << "  - Orphan blocks: " << totalOrphans << " (" << std::fixed << std::setprecision(2) << orphanPercentage << "%)" << std::endl;
+    
     Simulator::Destroy();
     return 0;
 }
