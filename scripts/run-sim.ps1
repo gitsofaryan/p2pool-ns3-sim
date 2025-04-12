@@ -54,12 +54,12 @@ if (-not (Test-Path $ns3Dir)) {
 
 # List extracted directories for debugging
 Write-Host "Listing extracted directories:"
-Get-ChildItem "$PSScriptRoot/.." | Format-Table -AutoSize
+Get-ChildItem "$PSScriptRoot/.." -Directory | Format-Table -AutoSize
 
 # Verify the scratch directory exists
 if (-not (Test-Path "$ns3Dir/scratch")) {
-    Write-Error "NS-3 scratch directory not found: $ns3Dir/scratch"
-    exit 1
+    Write-Host "Creating scratch directory"
+    New-Item -ItemType Directory -Path "$ns3Dir/scratch" -Force
 }
 
 # Copy the simulation script to the NS-3 scratch directory
@@ -78,13 +78,21 @@ if (-not (Test-Path "build")) {
     New-Item -ItemType Directory -Name "build"
 }
 Set-Location "build"
+
 try {
     Write-Host "Running CMake with verbose output..."
-    # Use correct flags for NS-3 3.44, disable optional features
-    cmake .. -G "Visual Studio 17 2022" -A x64 -DNS3_LOG=ON -DNS3_ASSERT=ON -DNS3_EXAMPLES=OFF -DNS3_TESTS=OFF -DNS3_PYTHON_BINDINGS=OFF -DNS3_GTK3=OFF -DNS3_MPI=OFF -DCMAKE_VERBOSE_MAKEFILE=ON
+    # Create a minimal CMake option set, disabling optional features that might cause issues
+    cmake .. -G "Visual Studio 17 2022" -A x64 `
+        -DNS3_EXAMPLES=OFF `
+        -DNS3_TESTS=OFF `
+        -DNS3_PYTHON_BINDINGS=OFF `
+        -DNS3_GTK3=OFF `
+        -DNS3_MPI=OFF `
+        -DCMAKE_BUILD_TYPE=Release
+    
     Write-Host "Building NS-3 (p2pool-sim only)..."
-    # Build only the scratch program to isolate issues
-    cmake --build . --config Release --target p2pool-sim -- -maxcpucount > build.log 2>&1
+    # Build only the scratch program with better verbosity
+    cmake --build . --config Release --target scratch/p2pool-sim -- -maxcpucount:4 -verbosity:normal | Tee-Object -FilePath build.log
 }
 catch {
     Write-Error "Failed to build NS-3: $_"
@@ -94,17 +102,28 @@ catch {
     }
     exit 1
 }
-finally {
-    # Check if build directory contains expected output
-    $exePath = ".\scratch\p2pool-sim\p2pool-sim.exe"
-    if (-not (Test-Path $exePath)) {
-        Write-Error "Build did not produce expected executable: $exePath"
-        if (Test-Path "build.log") {
-            Write-Host "Build log contents:"
-            Get-Content "build.log"
-        }
-        exit 1
+
+# Locate the executable
+$exePath = $null
+$possibleExePaths = @(
+    ".\ns3.44-p2pool-sim-release.exe",
+    ".\scratch\p2pool-sim.exe",
+    ".\scratch\p2pool-sim\p2pool-sim.exe",
+    ".\scratch\Release\p2pool-sim.exe"
+)
+
+foreach ($path in $possibleExePaths) {
+    if (Test-Path $path) {
+        $exePath = $path
+        Write-Host "Found executable at: $exePath"
+        break
     }
+}
+
+if (-not $exePath) {
+    Write-Error "Could not find built executable. Searching for any .exe files:"
+    Get-ChildItem -Path "." -Recurse -Filter "*.exe" | ForEach-Object { Write-Host $_.FullName }
+    exit 1
 }
 
 # Run the simulation
